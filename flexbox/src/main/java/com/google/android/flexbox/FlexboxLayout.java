@@ -257,14 +257,21 @@ public class FlexboxLayout extends ViewGroup {
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        // Check whether the order attributes have changed from the last measurement.
+        // If any children's order attribute is changed via View#setLayoutParams, there is no way
+        // for the FlexboxLayout to detect the change (ViewGroup#onSetLayoutParams is a hidden
+        // method, can't override it)
         if (isOrderChangedFromLastMeasurement()) {
             mReorderedIndices = createReorderedIndices();
+            mIndexAffectedFromLastMeasure = 0;
         }
 
+        // Determine the flex lines that haven't changed from the last measurement.
+        // And remove the flex lines that needs to be recalculated from the mFlexLines field
         int itemCountSum = 0;
         mFlexLinesCountNotAffected = 0;
         if (mIndexAffectedFromLastMeasure > 0) {
-            // The last flex item needs to be calculated anyway regardless of the diff from the
+            // The last flex item needs to be calculated regardless of the diff from the
             // last measurement, thus skip the last flex line
             for (int i = 0; i < mFlexLines.size() - 1; i++) {
                 FlexLine flexLine = mFlexLines.get(i);
@@ -276,7 +283,6 @@ public class FlexboxLayout extends ViewGroup {
                 }
             }
         }
-
         // The first n flex lines don't need to be recalculated where n < mFlexLinesCountNotAffected
         // Preserve the n flex line and remove the rest of the flex lines.
         if (mFlexLinesCountNotAffected > 0) {
@@ -332,6 +338,41 @@ public class FlexboxLayout extends ViewGroup {
         super.addView(child, index, params);
     }
 
+    @Override
+    public void removeView(View view) {
+        int removeIndex = indexOfChild(view);
+        mReorderedIndices = createReorderedIndicesMinus(removeIndex, 1);
+        if (removeIndex != -1) {
+            mIndexAffectedFromLastMeasure = mReorderedIndices[removeIndex];
+        }
+        mFlexLinesCache = new ArrayList<>(mFlexLines);
+        super.removeView(view);
+    }
+
+    @Override
+    public void removeViewAt(int index) {
+        mReorderedIndices = createReorderedIndicesMinus(index, 1);
+        if (index >= 0 && index < mReorderedIndices.length) {
+            mIndexAffectedFromLastMeasure = mReorderedIndices[index];
+        }
+        mFlexLinesCache = new ArrayList<>(mFlexLines);
+        super.removeViewAt(index);
+    }
+
+    @Override
+    public void removeViews(int start, int count) {
+        mReorderedIndices = createReorderedIndicesMinus(start, count);
+        int minAffectedIndex = Integer.MAX_VALUE;
+        for (int i = start; i < start + count; i++) {
+            if (i >= 0 && i < mReorderedIndices.length) {
+                minAffectedIndex = Math.min(minAffectedIndex, mReorderedIndices[i]);
+            }
+        }
+        mIndexAffectedFromLastMeasure = Math.min(0, minAffectedIndex);
+        mFlexLinesCache = new ArrayList<>(mFlexLines);
+        super.removeViews(start, count);
+    }
+
     /**
      * Create an array, which indicates the reordered indices that {@link LayoutParams#order}
      * attributes are taken into account. This method takes a View before that is added as the
@@ -383,7 +424,31 @@ public class FlexboxLayout extends ViewGroup {
     private int[] createReorderedIndices() {
         int childCount = getChildCount();
         List<Order> orders = createOrders(childCount);
-        return sortOrdersIntoReorderedIndices(childCount, orders);
+        return sortOrdersIntoReorderedIndices(orders.size(), orders);
+    }
+
+    /**
+     *
+     * @param start
+     * @param count
+     * @return
+     */
+    private int[] createReorderedIndicesMinus(int start, int count) {
+        int childCount = getChildCount();
+        List<Order> orders = createOrders(childCount);
+        count = Math.max(0, count);
+        int end = Math.min(orders.size(), start + count);
+        int removedItems = 0;
+        for (int i = start; i < end; i++) {
+            if (orders.size() > start && start >= 0) {
+                orders.remove(start);
+                removedItems++;
+            }
+        }
+        for (int i = start; i < orders.size(); i++) {
+            orders.get(i).index -= removedItems;
+        }
+        return sortOrdersIntoReorderedIndices(orders.size(), orders);
     }
 
     private int[] sortOrdersIntoReorderedIndices(int childCount, List<Order> orders) {
@@ -633,7 +698,7 @@ public class FlexboxLayout extends ViewGroup {
         int largestWidthInColumn = Integer.MIN_VALUE;
         FlexLine flexLine = new FlexLine();
         flexLine.mainSize = paddingTop;
-        for (int i = 0; i < childCount; i++) {
+        for (int i = startIndex; i < childCount; i++) {
             View child = getReorderedChildAt(i);
             if (child == null) {
                 continue;
@@ -1668,7 +1733,8 @@ public class FlexboxLayout extends ViewGroup {
         // childLeft is used to align the horizontal position of the children views.
         int childRight = width - paddingRight;
 
-        // If there are some flex lines that haven't changed, shift the starting vertical positions
+        // If there are some flex lines that haven't changed, shift the starting horizontal
+        // positions
         for (int i = 0; i < mFlexLinesCountNotAffected; i++) {
             childRight -= mFlexLines.get(i).crossSize;
             childLeft += mFlexLines.get(i).crossSize;
@@ -1852,6 +1918,7 @@ public class FlexboxLayout extends ViewGroup {
     public void setFlexDirection(@FlexDirection int flexDirection) {
         if (mFlexDirection != flexDirection) {
             mFlexDirection = flexDirection;
+            mFlexLinesCache.clear();
             requestLayout();
         }
     }
@@ -1864,6 +1931,7 @@ public class FlexboxLayout extends ViewGroup {
     public void setFlexWrap(@FlexWrap int flexWrap) {
         if (mFlexWrap != flexWrap) {
             mFlexWrap = flexWrap;
+            mFlexLinesCache.clear();
             requestLayout();
         }
     }
@@ -1876,6 +1944,7 @@ public class FlexboxLayout extends ViewGroup {
     public void setJustifyContent(@JustifyContent int justifyContent) {
         if (mJustifyContent != justifyContent) {
             mJustifyContent = justifyContent;
+            mFlexLinesCache.clear();
             requestLayout();
         }
     }
@@ -1888,6 +1957,7 @@ public class FlexboxLayout extends ViewGroup {
     public void setAlignItems(@AlignItems int alignItems) {
         if (mAlignItems != alignItems) {
             mAlignItems = alignItems;
+            mFlexLinesCache.clear();
             requestLayout();
         }
     }
@@ -1900,6 +1970,7 @@ public class FlexboxLayout extends ViewGroup {
     public void setAlignContent(@AlignContent int alignContent) {
         if (mAlignContent != alignContent) {
             mAlignContent = alignContent;
+            mFlexLinesCache.clear();
             requestLayout();
         }
     }
